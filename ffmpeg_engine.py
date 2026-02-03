@@ -38,112 +38,223 @@ class MultiviewerEngine:
 
         for slot, patterns in self.slot_patterns.items():
             for pattern in patterns:
-                # Find first matching file
-                match = next((f for f in video_files if pattern in f), None)
+                # Find first matching file with strict check
+                # Pattern must be at START or preceded by _ to avoid substring match (e.g., 240913 matches 13_)
+                match = next((f for f in video_files if f.startswith(pattern) or f"_{pattern}" in f), None)
                 if match:
                     mapping[slot] = os.path.join(folder_path, match)
-                    break # Stop if match found (important for priority Top > 13)
+                    break # Stop if match found (priority Top > 13)
         
         return mapping
 
-    def build_command(self, file_mapping, output_path, overlay_text="", is_preview=False):
+    def find_ffmpeg(self):
         """
-        Builds the FFmpeg command using ffmpeg-python fluent interface (conceptually) 
-        or raw command line arguments for subprocess.
+        Attempts to find the FFmpeg binary in common locations.
         """
+        import shutil
+        
+        # 1. Check if in PATH
+        ffmpeg_bin = shutil.which("ffmpeg")
+        if ffmpeg_bin:
+            return ffmpeg_bin
+            
+        # 2. Check for static-ffmpeg
+        try:
+            import static_ffmpeg
+            # This adds ffmpeg to the path for the current process
+            static_ffmpeg.add_paths()
+            ffmpeg_bin = shutil.which("ffmpeg")
+            if ffmpeg_bin:
+                return ffmpeg_bin
+        except ImportError:
+            pass
+            
+        # 3. Common Mac locations & specific static-ffmpeg paths
+        common_paths = [
+            "/Users/gimmyeongseob/Library/Python/3.9/lib/python/site-packages/static_ffmpeg/bin/darwin_arm64/ffmpeg",
+            "/usr/local/bin/ffmpeg",
+            "/opt/homebrew/bin/ffmpeg",
+            "/usr/bin/ffmpeg"
+        ]
+        for path in common_paths:
+            if os.path.exists(path):
+                return path
+                
+        return "ffmpeg" # Fallback to default
+
+    def build_command(self, file_mapping, output_path, overlay_text="", is_preview=False, codec_idx=0):
+        """
+        Builds the FFmpeg command.
+        """
+        
+        ffmpeg_exe = self.find_ffmpeg()
         
         # Base input settings
-        inputs = []
         filter_complex = []
-        
-        # 1. Input Processing
-        # We need to construct inputs. If a slot is None, we use a color source.
-        
         valid_input_count = 0
         first_valid_input_path = None
-        
-        # To ensure we track which input index corresponds to which slot for xstack
         input_args = []
         
+        # 1. Input Processing
+        # Detect target FPS & Duration from first valid file for placeholders
+        target_fps = 30.0
+        target_duration = 0.0
+        
+        for i in range(9):
+             path = file_mapping.get(i)
+             if path:
+                 target_fps = self.get_fps(path)
+                 target_duration = self.get_duration(path)
+                 break
+                 
         for i in range(9):
             file_path = file_mapping.get(i)
             if file_path:
-                # Real file input
                 input_args.extend(['-i', file_path])
                 valid_input_count += 1
                 if not first_valid_input_path:
                     first_valid_input_path = file_path
                 
-                # Filter for this input: Scale & Pad
-                # [i:v]scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2[v_i]
                 filter_complex.append(
                     f"[{i}:v]scale=640:360:force_original_aspect_ratio=decrease,"
                     f"pad=640:360:(ow-iw)/2:(oh-ih)/2[v{i}]"
                 )
             else:
-                # Missing file -> Black placeholder
-                # We can't easily add a 'color' input source mixed with file inputs in a simple way for indices.
-                # Actually, simplest way for 'missing' in complex filter graph where inputs are dynamic 
-                # is to add the color source as an input or generate it in filter.
-                # Let's add it as an input using -f lavfi.
-                input_args.extend(['-f', 'lavfi', '-i', 'color=c=black:s=640x360'])
-                # No scaling needed for generated black, but we need to label the stream
-                filter_complex.append(f"[{i}:v]null[v{i}]") # Pass-through to name it v{i}
+                # Match FPS and DURATION to avoid bottleneck and infinite loop
+                # Apply -t to the input itself if possible, or use trim filter. 
+                # Simplest for lavfi is adding duration to the input option or using -t before -i?
+                # For lavfi, -t works as input option.
+                duration_opt = ['-t', str(target_duration)] if target_duration > 0 else []
+                input_args.extend(duration_opt)
+                input_args.extend(['-f', 'lavfi', '-i', f'color=c=black:s=640x360:r={target_fps}'])
+                filter_complex.append(f"[{i}:v]null[v{i}]")
 
         # 2. XStack
-        # xstack=inputs=9:layout=...
         layout = (
             "0_0|640_0|1280_0|"
             "0_360|640_360|1280_360|"
             "0_720|640_720|1280_720"
         )
-        
-        # Concatenate input streams for xstack
         xstack_inputs = "".join([f"[v{i}]" for i in range(9)])
         filter_complex.append(f"{xstack_inputs}xstack=inputs=9:layout={layout}[stacked]")
 
-        # 3. Draw Text (on the stacked output)
+        # 3. Draw Text
         final_tag = "out"
         if overlay_text:
-            # Drawtext logic
-            # escape text logic might be needed for special chars
             safe_text = overlay_text.replace(":", "\\:").replace("'", "")
+            
+            # Select Font for Mac
+            font_path = "/System/Library/Fonts/Supplemental/AppleGothic.ttf"
+            if not os.path.exists(font_path):
+                 # Fallback
+                 font_path = "/System/Library/Fonts/AppleSDGothicNeo.ttc"
+            
+            font_opt = f"fontfile='{font_path}':" if os.path.exists(font_path) else ""
+            
             drawtext_filter = (
-                f"drawtext=text='{safe_text}':fontcolor=white:fontsize=48:"
-                f"x=(w-text_w)/2:y=h-80:box=1:boxcolor=black@0.5" # Bottom center
+                f"drawtext=text='{safe_text}':{font_opt}fontcolor=white:fontsize=48:"
+                f"x=(w-text_w)/2:y=h-80:box=1:boxcolor=black@0.5"
             )
             filter_complex.append(f"[stacked]{drawtext_filter}[{final_tag}]")
         else:
             final_tag = "stacked"
 
         # Construct final command
-        cmd = ['ffmpeg', '-y']
-        
-        # Add frame rate from first valid input if available, else default
-        # Note: -r before input forces interpretation, after forces output. 
-        # Requirement: "detect from first valid source and apply to whole video"
-        # We'll just rely on the encoder defaults or force output generic if needed.
-        # But user asked to use -r option.
+        cmd = [ffmpeg_exe, '-y']
         cmd.extend(input_args)
         cmd.extend(['-filter_complex', ";".join(filter_complex)])
         cmd.extend(['-map', f"[{final_tag}]"])
         
         # Encoding settings
-        cmd.extend(['-c:v', 'libx264'])
-        cmd.extend(['-b:v', '20M'])
-        cmd.extend(['-preset', 'medium'])
+        import platform
+        if platform.system() == 'Darwin':
+            # 0 = H.265 (HEVC), 1 = H.264
+            is_hevc = codec_idx == 0 
+            
+            if is_hevc:
+                cmd.extend(['-c:v', 'hevc_videotoolbox'])
+                cmd.extend(['-b:v', '10M']) # Optimized for HEVC
+                cmd.extend(['-tag:v', 'hvc1']) # Apple compatibility
+            else:
+                cmd.extend(['-c:v', 'h264_videotoolbox'])
+                cmd.extend(['-b:v', '15M']) # Optimized for H.264 (Reduced from 20M)
+        else:
+            # Software Encoding (Windows/Linux) - Fallback
+            cmd.extend(['-c:v', 'libx264'])
+            cmd.extend(['-b:v', '15M'])
+            cmd.extend(['-preset', 'fast'])
         
         if is_preview:
-             cmd.extend(['-t', '1']) # 1 second for preview
+             cmd.extend(['-t', '1']) 
+        else:
+             cmd.append('-shortest')
 
         cmd.append(output_path)
-        
         return cmd
+
+    def find_ffprobe(self):
+        """
+        Attempts to find the FFprobe binary in common locations.
+        """
+        import shutil
+        ffmpeg_bin = shutil.which("ffprobe")
+        if ffmpeg_bin:
+            return ffmpeg_bin
+            
+        common_paths = [
+            "/Users/gimmyeongseob/Library/Python/3.9/lib/python/site-packages/static_ffmpeg/bin/darwin_arm64/ffprobe",
+            "/usr/local/bin/ffprobe",
+            "/opt/homebrew/bin/ffprobe",
+            "/usr/bin/ffprobe"
+        ]
+        for path in common_paths:
+            if os.path.exists(path):
+                return path
+        return "ffprobe"
+
+    def get_fps(self, file_path):
+        """
+        Attempts to read the frame rate of the video file.
+        Returns float (e.g. 60.0, 30.0) or default 30.0 if failed.
+        """
+        try:
+            ffprobe_exe = self.find_ffprobe()
+            cmd = [
+                ffprobe_exe, 
+                '-v', 'error', 
+                '-select_streams', 'v:0',
+                '-show_entries', 'stream=r_frame_rate', 
+                '-of', 'default=noprint_wrappers=1:nokey=1', 
+                file_path
+            ]
+            
+            result = subprocess.run(
+                cmd, 
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.PIPE, 
+                text=True, 
+                encoding='utf-8',
+                errors='ignore',
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+            )
+            
+            if result.returncode == 0:
+                fps_str = result.stdout.strip()
+                # fps can be "60/1" or "30000/1001"
+                if '/' in fps_str:
+                    num, den = map(float, fps_str.split('/'))
+                    if den > 0:
+                        return num / den
+                return float(fps_str)
+            return 30.0 # Default fallback
+        except Exception:
+            return 30.0
 
     def get_duration(self, file_path):
         try:
+            ffprobe_exe = self.find_ffprobe()
             cmd = [
-                'ffprobe', 
+                ffprobe_exe, 
                 '-v', 'error', 
                 '-show_entries', 'format=duration', 
                 '-of', 'default=noprint_wrappers=1:nokey=1', 

@@ -163,3 +163,9 @@ cython_debug/
 # Project specific
 *.code-workspace
 .agent/
+
+# Mac App Bundle
+*.app
+
+# Installer scripts
+get-pip.py

@@ -3,7 +3,7 @@ import os
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QLabel, QLineEdit, QPushButton, QFileDialog, QGridLayout, 
-    QFrame, QTextEdit, QProgressBar, QListWidget, QGroupBox, QMessageBox,
+    QFrame, QTextEdit, QProgressBar, QListWidget, QComboBox, QGroupBox, QMessageBox,
     QAbstractItemView
 )
 from PySide6.QtCore import Qt, Signal
@@ -27,22 +27,26 @@ class DarkPalette(QPalette):
         self.setColor(QPalette.HighlightedText, Qt.black)
 
 class SlotWidget(QFrame):
+    file_changed = Signal(int, str) # slot_idx, file_path
+
     def __init__(self, slot_idx, label_text):
         super().__init__()
+        self.slot_idx = slot_idx
         self.setFrameShape(QFrame.Box)
         self.setLineWidth(1)
         self.setStyleSheet("background-color: #1e1e1e; border: 1px solid #555;")
+        self.setAcceptDrops(True) # Enable Drag & Drop
         
         layout = QVBoxLayout(self)
         
-        self.idx_label = QLabel(f"슬롯 {slot_idx + 1}") # 1-based index for user friendliness
+        self.idx_label = QLabel(f"슬롯 {slot_idx + 1}") 
         self.idx_label.setStyleSheet("color: #888; font-size: 10px;")
         
         self.pattern_label = QLabel(label_text)
         self.pattern_label.setStyleSheet("color: #aaa; font-weight: bold;")
         self.pattern_label.setAlignment(Qt.AlignCenter)
         
-        self.file_label = QLabel("대기 중...")
+        self.file_label = QLabel("대기 중... (클릭/드래그)")
         self.file_label.setStyleSheet("color: #555; font-style: italic;")
         self.file_label.setWordWrap(True)
         self.file_label.setAlignment(Qt.AlignCenter)
@@ -50,10 +54,32 @@ class SlotWidget(QFrame):
         layout.addWidget(self.idx_label)
         layout.addWidget(self.pattern_label)
         layout.addWidget(self.file_label)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.accept()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        files = [u.toLocalFile() for u in event.mimeData().urls()]
+        if files:
+            # Take the first file
+            filepath = files[0]
+            if os.path.isfile(filepath) and filepath.lower().endswith(('.mp4', '.mov', '.mkv', '.avi')):
+                self.file_changed.emit(self.slot_idx, filepath)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            filepath, _ = QFileDialog.getOpenFileName(
+                self, "비디오 파일 선택", "", "Video Files (*.mp4 *.mov *.mkv *.avi)"
+            )
+            if filepath:
+                self.file_changed.emit(self.slot_idx, filepath)
         
     def set_file(self, filename):
         if filename:
-            self.file_label.setText(filename)
+            self.file_label.setText(os.path.basename(filename))
             self.file_label.setStyleSheet("color: #4CAF50; font-weight: bold;")
         else:
             self.file_label.setText("누락됨 (블랙)")
@@ -104,7 +130,7 @@ class MainWindow(QMainWindow):
     
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Antigravity 드라이빙 플레이트 멀티뷰어")
+        self.setWindowTitle("CJENMVP 드라이빙플레이트 멀티뷰어 자동생성기 v1.0")
         self.resize(1000, 800)
         
         # Apply Dark Theme
@@ -211,6 +237,14 @@ class MainWindow(QMainWindow):
         """)
         self.render_btn.clicked.connect(self.request_render.emit)
         
+        # Codec Selection
+        self.codec_combo = QComboBox()
+        self.codec_combo.addItems(["H.265 (HEVC)", "H.264"])
+        self.codec_combo.setCurrentIndex(0) # Default to H.265
+        self.codec_combo.setToolTip("H.265: 고화질/저용량 (추천)\nH.264: 호환성 우수")
+        self.codec_combo.setStyleSheet("padding: 10px;")
+        
+        action_layout.addWidget(self.codec_combo)
         action_layout.addWidget(self.preview_btn)
         action_layout.addWidget(self.render_btn)
         
@@ -273,7 +307,7 @@ class MainWindow(QMainWindow):
         self.log_area = QTextEdit()
         self.log_area.setReadOnly(True)
         self.log_area.setMaximumHeight(150)
-        self.log_area.setStyleSheet("background: #111; color: #0f0; font-family: Consolas;")
+        self.log_area.setStyleSheet("background: #111; color: #0f0; font-family: monospace;")
         main_layout.addWidget(self.log_area)
 
     def browse_folder(self):

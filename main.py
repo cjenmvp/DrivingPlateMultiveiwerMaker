@@ -10,15 +10,18 @@ from gui import MainWindow
 from ffmpeg_engine import MultiviewerEngine
 
 class FFmpegWorker(QThread):
-    finished = Signal(int, str) # return_code, message
+    conversion_finished = Signal(int, str) # return_code, message
     progress = Signal(int)      # percentage 0-100
     
-    def __init__(self, command, total_duration=0):
-        super().__init__()
+    def __init__(self, command, total_duration=0, parent=None):
+        super().__init__(parent)
         self.command = command
         self.total_duration = total_duration
         
     def run(self):
+        import select
+        import time
+        
         try:
             # Hide console window on Windows
             startupinfo = None
@@ -26,41 +29,70 @@ class FFmpegWorker(QThread):
                 startupinfo = subprocess.STARTUPINFO()
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
                 
-            # Run command
+            # Run command (Use bytes for non-blocking read via select)
             process = subprocess.Popen(
                 self.command, 
-                stdout=subprocess.PIPE, 
+                stdout=subprocess.DEVNULL, 
                 stderr=subprocess.PIPE,
-                text=True,
+                text=False, # We deal with bytes for select
                 startupinfo=startupinfo,
-                encoding='utf-8',
-                errors='replace',
-                bufsize=0 # Unbuffered
+                bufsize=0 
             )
             
-            # Read stderr for progress
-            buffer = ""
+            # Read stderr for progress with timeout
+            buffer = b""
+            last_activity_time = time.time()
+            STALL_TIMEOUT = 30.0 # 30 seconds timeout
+            
             while True:
-                # Read 1 char at a time to handle \r without blocking
-                char = process.stderr.read(1)
-                if not char and process.poll() is not None:
-                    break
+                # Check watchdog
+                if time.time() - last_activity_time > STALL_TIMEOUT:
+                    process.kill()
+                    self.conversion_finished.emit(-1, f"Error: Process stalled for {STALL_TIMEOUT}s (Timeout)")
+                    return
+
+                # Non-blocking check
+                if os.name == 'nt':
+                    pass 
                 
-                if char:
-                    buffer += char
-                    if char in ('\r', '\n'):
-                        self.parse_progress(buffer)
-                        buffer = ""
+                reads = [process.stderr.fileno()]
+                ret = select.select(reads, [], [], 1.0) # 1 sec wait
+                
+                if reads[0] in ret[0]:
+                    # Data available
+                    chunk = os.read(process.stderr.fileno(), 1024)
+                    if not chunk:
+                        # EOF
+                        if process.poll() is not None:
+                            break
+                        continue
+                    
+                    last_activity_time = time.time()
+                    buffer += chunk
+                    
+                    # Process lines (simplistic)
+                    msg = buffer.decode('utf-8', errors='ignore')
+                    self.parse_progress(msg)
+                        
+                    # Keep only last part to avoid huge buffer
+                    if len(buffer) > 200:
+                        buffer = buffer[-50:]
+                else:
+                    # No data for 1 sec
+                    if process.poll() is not None:
+                         break
             
             stdout, stderr = process.communicate()
             
             if process.returncode == 0:
-                self.finished.emit(0, "Success")
+                self.conversion_finished.emit(0, "Success")
             else:
-                self.finished.emit(process.returncode, f"Error:\n{stderr}")
+                # Capture last part of stderr for debugging
+                err_msg = buffer[-1000:].decode('utf-8', errors='ignore') if buffer else "No stderr captured"
+                self.conversion_finished.emit(process.returncode, f"Error (Code {process.returncode}):\n{err_msg}")
                 
         except Exception as e:
-            self.finished.emit(-1, str(e))
+            self.conversion_finished.emit(-1, str(e))
 
     def parse_progress(self, line):
         # time=00:00:00.00 or time=123.45 => We look for time= expression common in ffmpeg output
@@ -95,6 +127,15 @@ class AppController(QObject):
         
         # Connect Drag & Drop Signal
         self.view.queue_list.folders_dropped.connect(self.handle_dropped_folders)
+        
+        # Connect Slot Manual Override
+        for slot in self.view.slots:
+            slot.file_changed.connect(self.handle_manual_assignment)
+        
+    def handle_manual_assignment(self, slot_idx, filepath):
+        self.current_mapping[slot_idx] = filepath
+        self.view.update_slots(self.current_mapping)
+        self.view.log(f"슬롯 {slot_idx + 1} 수동 변경: {os.path.basename(filepath)}")
         
     def handle_scan(self, folder_path):
         self.view.log(f"스캔 중: {folder_path}")
@@ -219,9 +260,10 @@ class AppController(QObject):
 
     def run_ffmpeg(self, is_preview):
         # Wrapper for single immediate run (Current State)
-        if not shutil.which("ffmpeg"):
-            self.view.log("오류: FFmpeg를 찾을 수 없습니다.")
-            return
+        ffmpeg_bin = self.engine.find_ffmpeg()
+        if not ffmpeg_bin or (ffmpeg_bin == "ffmpeg" and not shutil.which("ffmpeg")) or (ffmpeg_bin != "ffmpeg" and not os.path.exists(ffmpeg_bin)):
+             self.view.log("오류: FFmpeg를 찾을 수 없습니다.")
+             return
 
         # Prepare 'Job' from current state
         if not self.current_mapping or not any(self.current_mapping.values()):
@@ -257,11 +299,16 @@ class AppController(QObject):
             # Overwrite preview
             output_path = os.path.join(output_folder, output_filename)
 
+        # Get Codec Selection
+        # 0 = H.265 (HEVC), 1 = H.264
+        codec_idx = self.view.codec_combo.currentIndex()
+
         cmd = self.engine.build_command(
             job['mapping'], 
             output_path, 
             overlay_text=job['text'], 
-            is_preview=is_preview
+            is_preview=is_preview,
+            codec_idx=codec_idx
         )
         
         # Duration for progress
@@ -285,11 +332,12 @@ class AppController(QObject):
         self.view.add_queue_btn.setEnabled(False)
         self.view.progress_bar.setValue(0)
         
-        self.worker = FFmpegWorker(cmd, total_duration)
+        self.worker = FFmpegWorker(cmd, total_duration, parent=self)
         self.worker.progress.connect(self.view.progress_bar.setValue)
-        self.worker.finished.connect(
+        self.worker.conversion_finished.connect(
             lambda code, msg: self.on_process_finished(code, msg, output_path, is_queue, is_preview)
         )
+        self.worker.finished.connect(self.worker.deleteLater)
         self.worker.start()
         
     def on_process_finished(self, code, msg, output_path, is_queue, is_preview):
