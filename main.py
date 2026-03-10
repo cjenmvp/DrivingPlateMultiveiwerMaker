@@ -230,6 +230,7 @@ class AppController(QObject):
                 "folder": folder,
                 "mapping": mapping,
                 "text": default_text,
+                "include_lut_text": self.view.include_lut_check.isChecked(),
                 "output_root": output_root,
                 "lut_mapping": self.current_luts.copy(),
                 "status": "Ready"
@@ -251,6 +252,7 @@ class AppController(QObject):
             "folder": self.current_folder,
             "mapping": self.current_mapping.copy(), # Important to copy
             "text": ui_data['text'],
+            "include_lut_text": self.view.include_lut_check.isChecked(),
             "output_root": ui_data['output_root'],
             "lut_mapping": self.current_luts.copy(),
             "status": "Ready"
@@ -333,6 +335,7 @@ class AppController(QObject):
             "folder": self.current_folder,
             "mapping": self.current_mapping,
             "text": self.view.text_input.text(),
+            "include_lut_text": self.view.include_lut_check.isChecked(),
             "output_root": self.view.output_input.text(),
             "lut_mapping": self.current_luts
         }
@@ -389,7 +392,7 @@ class AppController(QObject):
 
         # Update Overlay Text with LUT info
         overlay_text = job['text']
-        if lut_suffix:
+        if lut_suffix and job.get('include_lut_text', True):
             overlay_text += f"{lut_suffix}"
 
         cmd = self.engine.build_command(
