@@ -6,7 +6,7 @@ import re
 from PySide6.QtWidgets import QApplication, QMessageBox
 from PySide6.QtCore import QThread, Signal, QObject, Qt
 
-from gui import MainWindow
+from gui import MainWindow, LutConfigDialog
 from ffmpeg_engine import MultiviewerEngine
 
 class FFmpegWorker(QThread):
@@ -112,6 +112,7 @@ class AppController(QObject):
         
         self.current_mapping = {}
         self.current_folder = ""
+        self.current_luts = {} # {slot_idx: lut_path}
         
         # Queue System
         self.job_queue = [] # List of dicts
@@ -124,6 +125,7 @@ class AppController(QObject):
         self.view.request_add_queue.connect(self.handle_add_queue)
         self.view.request_start_queue.connect(self.handle_start_queue)
         self.view.request_remove_queue.connect(self.handle_remove_queue)
+        self.view.request_lut_settings.connect(self.handle_lut_settings)
         
         # Connect Drag & Drop Signal
         self.view.queue_list.folders_dropped.connect(self.handle_dropped_folders)
@@ -132,11 +134,66 @@ class AppController(QObject):
         for slot in self.view.slots:
             slot.file_changed.connect(self.handle_manual_assignment)
         
+    def get_short_lut_name(self, full_name):
+        """
+        Convert long LUT names/keywords into shorter abbreviations.
+        """
+        if not full_name:
+            return ""
+            
+        # Common mapping for abbreviations
+        mapping = {
+            "Panasonic": "PAN",
+            "Sony": "SNY",
+            "V-Log": "VLG",
+            "VLog": "VLG",
+            "S-Log3": "SLG3",
+            "SLog3": "SLG3",
+            "Rec.709": "709",
+            "Rec709": "709",
+            "Arri": "ARI",
+            "LogC": "LGC",
+            "Cine": "CNE",
+            "Standard": "STD",
+            "Neutral": "NTRL"
+        }
+        
+        short_name = full_name
+        for key, val in mapping.items():
+            # Case insensitive replacement
+            pattern = re.compile(re.escape(key), re.IGNORECASE)
+            short_name = pattern.sub(val, short_name)
+            
+        return short_name
+
     def handle_manual_assignment(self, slot_idx, filepath):
         self.current_mapping[slot_idx] = filepath
         self.view.update_slots(self.current_mapping)
         self.view.log(f"슬롯 {slot_idx + 1} 수동 변경: {os.path.basename(filepath)}")
         
+    def handle_lut_settings(self):
+        # Allow LUT settings without scanning first
+        dlg = LutConfigDialog(self.view, self.current_mapping, self.current_luts)
+        if dlg.exec():
+            # Save new mapping
+            self.current_luts = dlg.get_mapping()
+            # Count set LUTs
+            count = len(self.current_luts)
+            if count > 0:
+                self.view.log(f"LUT 설정됨: {count}개 슬롯에 적용")
+            else:
+                self.view.log("LUT 설정 초기화 (모두 해제)")
+
+            # Also update pending jobs in queue
+            updated_count = 0
+            for job in self.job_queue:
+                if job['status'] == "Ready":
+                    job['lut_mapping'] = self.current_luts.copy()
+                    updated_count += 1
+            
+            if updated_count > 0:
+                self.view.log(f"대기중인 {updated_count}개 작업에도 LUT 설정이 적용되었습니다.")
+
     def handle_scan(self, folder_path):
         self.view.log(f"스캔 중: {folder_path}")
         self.current_folder = folder_path
@@ -174,6 +231,7 @@ class AppController(QObject):
                 "mapping": mapping,
                 "text": default_text,
                 "output_root": output_root,
+                "lut_mapping": self.current_luts.copy(),
                 "status": "Ready"
             }
             
@@ -194,6 +252,7 @@ class AppController(QObject):
             "mapping": self.current_mapping.copy(), # Important to copy
             "text": ui_data['text'],
             "output_root": ui_data['output_root'],
+            "lut_mapping": self.current_luts.copy(),
             "status": "Ready"
         }
         
@@ -274,7 +333,8 @@ class AppController(QObject):
             "folder": self.current_folder,
             "mapping": self.current_mapping,
             "text": self.view.text_input.text(),
-            "output_root": self.view.output_input.text()
+            "output_root": self.view.output_input.text(),
+            "lut_mapping": self.current_luts
         }
         
         self.run_ffmpeg_job(job, is_preview, is_queue=False)
@@ -283,14 +343,38 @@ class AppController(QObject):
         # Core runner
         
         # output root check
+        # output root check
         output_folder = job['output_root'].strip()
+        
+        # If job has no output path (e.g. added before setting path), try using current UI
+        if not output_folder:
+            output_folder = self.view.output_input.text().strip()
+            
         if not output_folder or not os.path.isdir(output_folder):
             output_folder = job['folder']
             
         # output filename
         suffix = "_preview" if is_preview else "_multiview"
         folder_name = os.path.basename(job['folder'].rstrip(os.sep))
-        output_filename = f"{folder_name}{suffix}.mp4"
+        
+        # Determine LUT suffix
+        lut_mapping = job.get('lut_mapping', {})
+        lut_suffix = ""
+        if lut_mapping:
+            # Get unique LUT names (without extension)
+            lut_names = set()
+            for path in lut_mapping.values():
+                if path:
+                    name = os.path.splitext(os.path.basename(path))[0]
+                    lut_names.add(name)
+            
+            if lut_names:
+                # Apply shortening to each LUT name
+                short_lut_names = [self.get_short_lut_name(name) for name in sorted(lut_names)]
+                # Join with _ if multiple, but usually one
+                lut_suffix = "_" + "_".join(short_lut_names)
+
+        output_filename = f"{folder_name}{lut_suffix}{suffix}.mp4"
         
         if not is_preview:
             # Apply versioning only for render
@@ -303,12 +387,18 @@ class AppController(QObject):
         # 0 = H.265 (HEVC), 1 = H.264
         codec_idx = self.view.codec_combo.currentIndex()
 
+        # Update Overlay Text with LUT info
+        overlay_text = job['text']
+        if lut_suffix:
+            overlay_text += f"{lut_suffix}"
+
         cmd = self.engine.build_command(
             job['mapping'], 
             output_path, 
-            overlay_text=job['text'], 
+            overlay_text=overlay_text, 
             is_preview=is_preview,
-            codec_idx=codec_idx
+            codec_idx=codec_idx,
+            lut_mapping=lut_mapping
         )
         
         # Duration for progress
@@ -323,6 +413,7 @@ class AppController(QObject):
         
         self.view.log(f"작업 시작: {os.path.basename(output_path)}")
         self.view.log(f"저장 경로: {output_path}")
+
         if total_duration > 0:
              self.view.log(f"예상 소요 시간: {total_duration}초")
              

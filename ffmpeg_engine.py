@@ -82,10 +82,12 @@ class MultiviewerEngine:
                 
         return "ffmpeg" # Fallback to default
 
-    def build_command(self, file_mapping, output_path, overlay_text="", is_preview=False, codec_idx=0):
+    def build_command(self, file_mapping, output_path, overlay_text="", is_preview=False, codec_idx=0, lut_mapping=None):
         """
         Builds the FFmpeg command.
         """
+        if lut_mapping is None:
+            lut_mapping = {}
         
         ffmpeg_exe = self.find_ffmpeg()
         
@@ -115,8 +117,16 @@ class MultiviewerEngine:
                 if not first_valid_input_path:
                     first_valid_input_path = file_path
                 
+                # Check for LUT
+                lut_filter = ""
+                if i in lut_mapping and lut_mapping[i]:
+                    lut_path = lut_mapping[i]
+                    # Escape path for FFmpeg filter: replace \ with / and escape :
+                    safe_lut_path = lut_path.replace('\\', '/').replace(':', '\\:')
+                    lut_filter = f"lut3d=file='{safe_lut_path}',"
+
                 filter_complex.append(
-                    f"[{i}:v]scale=640:360:force_original_aspect_ratio=decrease,"
+                    f"[{i}:v]{lut_filter}scale=640:360:force_original_aspect_ratio=decrease,"
                     f"pad=640:360:(ow-iw)/2:(oh-ih)/2[v{i}]"
                 )
             else:

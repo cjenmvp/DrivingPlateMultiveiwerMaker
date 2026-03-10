@@ -4,7 +4,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QLabel, QLineEdit, QPushButton, QFileDialog, QGridLayout, 
     QFrame, QTextEdit, QProgressBar, QListWidget, QComboBox, QGroupBox, QMessageBox,
-    QAbstractItemView
+    QAbstractItemView, QDialog, QScrollArea
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont, QColor, QPalette
@@ -119,14 +119,151 @@ class DragDropListWidget(QListWidget):
             self.folders_dropped.emit(folders)
 
 
+class LutConfigDialog(QDialog):
+    def __init__(self, parent=None, current_mapping=None, current_luts=None):
+        super().__init__(parent)
+        self.setWindowTitle("LUT 설정")
+        self.resize(600, 500)
+        self.setStyleSheet("background-color: #2d2d2d; color: white;")
+        
+        self.lut_mapping = current_luts.copy() if current_luts else {}
+        self.rows = []
+        
+        layout = QVBoxLayout(self)
+        
+        # Scroll Area for 9 slots
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("background-color: #222; border: none;")
+        scroll_content = QWidget()
+        self.grid_layout = QGridLayout(scroll_content)
+        self.grid_layout.setSpacing(10)
+        
+        # Headers
+        self.grid_layout.addWidget(QLabel("슬롯"), 0, 0)
+        self.grid_layout.addWidget(QLabel("파일"), 0, 1)
+        self.grid_layout.addWidget(QLabel("적용된 LUT"), 0, 2)
+        self.grid_layout.addWidget(QLabel("변경"), 0, 3)
+        
+        slot_labels = [
+            "1 (Top-L)", "2 (Top-C)", "3 (Top-R)",
+            "4 (Mid-L)", "5 (Center)", "6 (Mid-R)",
+            "7 (Bot-L)", "8 (Bot-C)", "9 (Bot-R)"
+        ]
+        
+        for i in range(9):
+            # Label
+            lbl_slot = QLabel(slot_labels[i])
+            lbl_slot.setStyleSheet("color: #aaa; font-weight: bold;")
+            
+            # Filename
+            file_path = current_mapping.get(i)
+            filename = os.path.basename(file_path) if file_path else "파일 없음"
+            lbl_file = QLabel(filename)
+            lbl_file.setStyleSheet("color: #ddd;" if file_path else "color: #555; font-style: italic;")
+            
+            # LUT Path
+            current_lut = self.lut_mapping.get(i)
+            lut_name = os.path.basename(current_lut) if current_lut else "없음 (Rec.709)"
+            lbl_lut = QLabel(lut_name)
+            lbl_lut.setStyleSheet("color: #4CAF50;" if current_lut else "color: #777;")
+            
+            # Btns
+            btn_frame = QFrame()
+            btn_layout = QHBoxLayout(btn_frame)
+            btn_layout.setContentsMargins(0,0,0,0)
+            
+            btn_browse = QPushButton("선택...")
+            btn_browse.setStyleSheet("background-color: #2196F3; padding: 4px 8px; border-radius: 3px;")
+            btn_browse.clicked.connect(lambda _, idx=i, lbl=lbl_lut: self.browse_lut(idx, lbl))
+            
+            btn_clear = QPushButton("해제")
+            btn_clear.setStyleSheet("background-color: #555; padding: 4px 8px; border-radius: 3px;")
+            btn_clear.clicked.connect(lambda _, idx=i, lbl=lbl_lut: self.clear_lut(idx, lbl))
+            
+            btn_layout.addWidget(btn_browse)
+            btn_layout.addWidget(btn_clear)
+            
+            self.grid_layout.addWidget(lbl_slot, i+1, 0)
+            self.grid_layout.addWidget(lbl_file, i+1, 1)
+            self.grid_layout.addWidget(lbl_lut, i+1, 2)
+            self.grid_layout.addWidget(btn_frame, i+1, 3)
+            
+            self.rows.append({
+                "lut_label": lbl_lut
+            })
+            
+        scroll.setWidget(scroll_content)
+        layout.addWidget(scroll)
+        
+        # Bottom Actions
+        bot_layout = QHBoxLayout()
+        
+        btn_all = QPushButton("전체 슬롯에 동일 LUT 적용...")
+        btn_all.setStyleSheet("background-color: #FF9800; padding: 8px;")
+        btn_all.clicked.connect(self.apply_lut_all)
+        
+        btn_reset_all = QPushButton("전체 해제")
+        btn_reset_all.setStyleSheet("background-color: #607D8B; padding: 8px;")
+        btn_reset_all.clicked.connect(self.clear_all)
+        
+        bot_layout.addWidget(btn_all)
+        bot_layout.addWidget(btn_reset_all)
+        bot_layout.addStretch()
+        
+        btn_ok = QPushButton("확인")
+        btn_ok.setStyleSheet("background-color: #4CAF50; padding: 8px 20px; font-weight: bold;")
+        btn_ok.clicked.connect(self.accept)
+        
+        btn_cancel = QPushButton("취소")
+        btn_cancel.setStyleSheet("background-color: #D32F2F; padding: 8px 20px; font-weight: bold;")
+        btn_cancel.clicked.connect(self.reject)
+        
+        bot_layout.addWidget(btn_ok)
+        bot_layout.addWidget(btn_cancel)
+        
+        layout.addLayout(bot_layout)
+        
+    def browse_lut(self, idx, label_widget):
+        path, _ = QFileDialog.getOpenFileName(self, "LUT 파일 선택", "", "LUT Files (*.cube)")
+        if path:
+            self.lut_mapping[idx] = path
+            label_widget.setText(os.path.basename(path))
+            label_widget.setStyleSheet("color: #4CAF50;")
+            
+    def clear_lut(self, idx, label_widget):
+        if idx in self.lut_mapping:
+            del self.lut_mapping[idx]
+        label_widget.setText("없음 (Rec.709)")
+        label_widget.setStyleSheet("color: #777;")
+        
+    def apply_lut_all(self):
+        path, _ = QFileDialog.getOpenFileName(self, "전체 적용할 LUT 선택", "", "LUT Files (*.cube)")
+        if path:
+            for i in range(9):
+                self.lut_mapping[i] = path
+                self.rows[i]["lut_label"].setText(os.path.basename(path))
+                self.rows[i]["lut_label"].setStyleSheet("color: #4CAF50;")
+                
+    def clear_all(self):
+        self.lut_mapping.clear()
+        for i in range(9):
+            self.rows[i]["lut_label"].setText("없음 (Rec.709)")
+            self.rows[i]["lut_label"].setStyleSheet("color: #777;")
+        
+    def get_mapping(self):
+        return self.lut_mapping
+
+
 class MainWindow(QMainWindow):
     # Signals to be connected in controller
     request_scan = Signal(str)
     request_preview = Signal()
     request_render = Signal()
-    request_add_queue = Signal(dict) # {folder, text, mapping, output_path}
+    request_add_queue = Signal(dict) # {folder, text, mapping, output_path, lut_mapping}
     request_start_queue = Signal()
     request_remove_queue = Signal(int)
+    request_lut_settings = Signal()
     
     def __init__(self):
         super().__init__()
@@ -244,7 +381,17 @@ class MainWindow(QMainWindow):
         self.codec_combo.setToolTip("H.265: 고화질/저용량 (추천)\nH.264: 호환성 우수")
         self.codec_combo.setStyleSheet("padding: 10px;")
         
+        self.lut_btn = QPushButton("LUT 설정")
+        self.lut_btn.setStyleSheet("""
+            QPushButton {
+                 background-color: #673AB7; color: white; padding: 12px; border-radius: 4px; font-weight: bold;
+            }
+            QPushButton:hover { background-color: #5E35B1; }
+        """)
+        self.lut_btn.clicked.connect(self.request_lut_settings.emit)
+        
         action_layout.addWidget(self.codec_combo)
+        action_layout.addWidget(self.lut_btn)
         action_layout.addWidget(self.preview_btn)
         action_layout.addWidget(self.render_btn)
         

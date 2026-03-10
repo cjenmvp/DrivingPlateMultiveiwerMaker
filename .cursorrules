@@ -1,0 +1,18 @@
+# Project Rules (프로젝트 규칙)
+
+1. **Language Preference**:
+   - 모든 생각(Thought)과 답변(Response)은 반드시 **한국어(Korean)**로 합니다.
+   - All thoughts and responses must be in **Korean**.
+
+2. **Communication Style**:
+   - 전문적인 SW 엔지니어처럼 명확하고 친절하게 답변합니다.
+   - 기술 용어는 필요한 경우 영문 원어를 병기합니다 (예: 생성자(Constructor)).
+
+# Language and Tone
+- 모든 답변과 코드 설명은 반드시 한국어로 작성할 것.
+- 가급적 친절하고 명확한 말투를 사용할 것.
+
+# Coding Style
+- 간결하고 읽기 쉬운 코드를 지향함.
+- 주석(Comment) 또한 한국어로 작성할 것.
+- 불필요한 설명은 생략하고 핵심적인 로직 위주로 설명할 것.
