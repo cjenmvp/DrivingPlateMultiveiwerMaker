@@ -326,13 +326,8 @@ class MainWindow(QMainWindow):
         self.text_input.setPlaceholderText("영상에 넣을 텍스트 (기본값: 폴더명)")
         self.text_input.setStyleSheet("padding: 8px; border-radius: 4px; background: #333; color: white;")
         
-        self.include_lut_check = QCheckBox("영상 텍스트에 LUT 포함")
-        self.include_lut_check.setChecked(True)
-        self.include_lut_check.setStyleSheet("color: #aaa;")
-        
         text_layout.addWidget(text_label)
         text_layout.addWidget(self.text_input)
-        text_layout.addWidget(self.include_lut_check)
         main_layout.addLayout(text_layout)
 
         # 3. 3x3 Grid

@@ -230,7 +230,6 @@ class AppController(QObject):
                 "folder": folder,
                 "mapping": mapping,
                 "text": default_text,
-                "include_lut_text": self.view.include_lut_check.isChecked(),
                 "output_root": output_root,
                 "lut_mapping": self.current_luts.copy(),
                 "status": "Ready"
@@ -252,7 +251,6 @@ class AppController(QObject):
             "folder": self.current_folder,
             "mapping": self.current_mapping.copy(), # Important to copy
             "text": ui_data['text'],
-            "include_lut_text": self.view.include_lut_check.isChecked(),
             "output_root": ui_data['output_root'],
             "lut_mapping": self.current_luts.copy(),
             "status": "Ready"
@@ -335,7 +333,6 @@ class AppController(QObject):
             "folder": self.current_folder,
             "mapping": self.current_mapping,
             "text": self.view.text_input.text(),
-            "include_lut_text": self.view.include_lut_check.isChecked(),
             "output_root": self.view.output_input.text(),
             "lut_mapping": self.current_luts
         }
@@ -360,24 +357,9 @@ class AppController(QObject):
         suffix = "_preview" if is_preview else "_multiview"
         folder_name = os.path.basename(job['folder'].rstrip(os.sep))
         
-        # Determine LUT suffix
+        output_filename = f"{folder_name}{suffix}.mp4"
+        
         lut_mapping = job.get('lut_mapping', {})
-        lut_suffix = ""
-        if lut_mapping:
-            # Get unique LUT names (without extension)
-            lut_names = set()
-            for path in lut_mapping.values():
-                if path:
-                    name = os.path.splitext(os.path.basename(path))[0]
-                    lut_names.add(name)
-            
-            if lut_names:
-                # Apply shortening to each LUT name
-                short_lut_names = [self.get_short_lut_name(name) for name in sorted(lut_names)]
-                # Join with _ if multiple, but usually one
-                lut_suffix = "_" + "_".join(short_lut_names)
-
-        output_filename = f"{folder_name}{lut_suffix}{suffix}.mp4"
         
         if not is_preview:
             # Apply versioning only for render
@@ -390,10 +372,8 @@ class AppController(QObject):
         # 0 = H.265 (HEVC), 1 = H.264
         codec_idx = self.view.codec_combo.currentIndex()
 
-        # Update Overlay Text with LUT info
+        # Update Overlay Text
         overlay_text = job['text']
-        if lut_suffix and job.get('include_lut_text', True):
-            overlay_text += f"{lut_suffix}"
 
         cmd = self.engine.build_command(
             job['mapping'], 
