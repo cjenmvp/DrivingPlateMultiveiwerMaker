@@ -28,7 +28,7 @@ class MultiviewerEngine:
         folder_path = unicodedata.normalize('NFC', folder_path)
         files = os.listdir(folder_path)
         video_extensions = ('.mp4', '.mov', '.mkv', '.avi')
-        video_files = [f for f in files if f.lower().endswith(video_extensions)]
+        video_files = [f for f in files if f.lower().endswith(video_extensions) and not f.startswith('.')]
         
         mapping = {i: None for i in range(9)}
 
