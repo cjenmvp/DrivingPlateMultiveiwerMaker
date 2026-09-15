@@ -1,0 +1,91 @@
+{
+  "sample": "9 slots, alternating ProRes/H.264 1080p30, 3s, no LUT, synthetic testsrc2",
+  "note": "Default encoder quality/bitrate differs by backend; this is a workflow timing comparison, not equal-quality compression testing.",
+  "results": [
+    {
+      "codec": 1,
+      "mode": "baseline",
+      "seconds": [
+        1.994,
+        2.002
+      ],
+      "median_seconds": 1.9979999999999998
+    },
+    {
+      "codec": 1,
+      "mode": "cpu",
+      "seconds": [
+        1.096,
+        1.046
+      ],
+      "median_seconds": 1.0710000000000002
+    },
+    {
+      "codec": 1,
+      "mode": "hardware",
+      "seconds": [
+        0.88,
+        0.834
+      ],
+      "median_seconds": 0.857
+    },
+    {
+      "codec": 0,
+      "mode": "baseline",
+      "seconds": [
+        2.344,
+        2.306
+      ],
+      "median_seconds": 2.325
+    },
+    {
+      "codec": 0,
+      "mode": "cpu",
+      "seconds": [
+        1.389,
+        1.389
+      ],
+      "median_seconds": 1.389
+    },
+    {
+      "codec": 0,
+      "mode": "hardware",
+      "seconds": [
+        0.881,
+        0.87
+      ],
+      "median_seconds": 0.8755
+    },
+    {
+      "codec": 2,
+      "mode": "baseline",
+      "seconds": [
+        3.483,
+        3.496
+      ],
+      "median_seconds": 3.4895
+    },
+    {
+      "codec": 2,
+      "mode": "cpu",
+      "seconds": [
+        1.36,
+        1.359
+      ],
+      "median_seconds": 1.3595000000000002
+    },
+    {
+      "codec": 2,
+      "mode": "hardware",
+      "seconds": [
+        1.391,
+        1.24
+      ],
+      "median_seconds": 1.3155000000000001
+    }
+  ],
+  "hardware": "Apple M3 Ultra",
+  "reference_commit": "9f93be7",
+  "ffmpeg": "7.0",
+  "date": "2026-09-15"
+}
