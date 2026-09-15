@@ -1,4 +1,5 @@
 import sys
+from ffmpeg_engine import VIDEO_FILTER
 import os
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
@@ -34,7 +35,8 @@ class SlotWidget(QFrame):
         self.slot_idx = slot_idx
         self.setFrameShape(QFrame.Box)
         self.setLineWidth(1)
-        self.setStyleSheet("background-color: #1e1e1e; border: 1px solid #555;")
+        self.setObjectName("videoSlot")
+        self.setStyleSheet("QFrame#videoSlot {background-color: #1e1e1e; border: 1px solid #555;}")
         self.setAcceptDrops(True) # Enable Drag & Drop
         
         layout = QVBoxLayout(self)
@@ -54,6 +56,10 @@ class SlotWidget(QFrame):
         layout.addWidget(self.idx_label)
         layout.addWidget(self.pattern_label)
         layout.addWidget(self.file_label)
+        clear_btn = QPushButton("비우기")
+        clear_btn.setStyleSheet("color: #ccc; background: #383838; border: none; padding: 3px;")
+        clear_btn.clicked.connect(lambda: self.file_changed.emit(self.slot_idx, ""))
+        layout.addWidget(clear_btn)
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -66,13 +72,13 @@ class SlotWidget(QFrame):
         if files:
             # Take the first file
             filepath = files[0]
-            if os.path.isfile(filepath) and filepath.lower().endswith(('.mp4', '.mov', '.mkv', '.avi')):
+            if os.path.isfile(filepath):
                 self.file_changed.emit(self.slot_idx, filepath)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             filepath, _ = QFileDialog.getOpenFileName(
-                self, "비디오 파일 선택", "", "Video Files (*.mp4 *.mov *.mkv *.avi)"
+                self, "비디오 파일 선택", "", VIDEO_FILTER
             )
             if filepath:
                 self.file_changed.emit(self.slot_idx, filepath)
@@ -80,10 +86,12 @@ class SlotWidget(QFrame):
     def set_file(self, filename):
         if filename:
             self.file_label.setText(os.path.basename(filename))
+            self.file_label.setToolTip(filename)
             self.file_label.setStyleSheet("color: #4CAF50; font-weight: bold;")
         else:
-            self.file_label.setText("누락됨 (블랙)")
-            self.file_label.setStyleSheet("color: #FF5252; font-weight: bold;")
+            self.file_label.setText("비어 있음 (검정 출력)")
+            self.file_label.setToolTip("")
+            self.file_label.setStyleSheet("color: #aaa;")
 
 class DragDropListWidget(QListWidget):
     folders_dropped = Signal(list)
@@ -257,6 +265,9 @@ class LutConfigDialog(QDialog):
 
 class MainWindow(QMainWindow):
     # Signals to be connected in controller
+    request_files = Signal(list)
+    request_clear = Signal()
+    request_cancel = Signal()
     request_scan = Signal(str)
     request_preview = Signal()
     request_render = Signal()
@@ -267,7 +278,7 @@ class MainWindow(QMainWindow):
     
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("CJENMVP 드라이빙플레이트 멀티뷰어 자동생성기 v1.0")
+        self.setWindowTitle("CJENMVP 드라이빙플레이트 멀티뷰어 생성기 v3.0")
         self.resize(1000, 800)
         
         # Apply Dark Theme
@@ -275,10 +286,13 @@ class MainWindow(QMainWindow):
         
         # Main Widget
         central_widget = QWidget()
-        self.setCentralWidget(central_widget)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(central_widget)
+        self.setCentralWidget(scroll)
         main_layout = QVBoxLayout(central_widget)
-        main_layout.setSpacing(15)
-        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.setSpacing(8)
+        main_layout.setContentsMargins(12, 12, 12, 12)
 
         # 1. Header (Folder Selection)
         header_layout = QHBoxLayout()
@@ -299,6 +313,22 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(self.path_input)
         header_layout.addWidget(self.browse_btn)
         main_layout.addLayout(header_layout)
+        self.path_input.returnPressed.connect(lambda: self.request_scan.emit(self.path_input.text()))
+        manual_layout = QHBoxLayout()
+        self.scan_mode = QComboBox()
+        self.scan_mode.addItem("기존 네이밍으로 자동 배치", "naming")
+        self.scan_mode.addItem("파일명 순서로 9칸 배치", "sequential")
+        self.scan_mode.addItem("수동 배치 (빈 슬롯부터)", "manual")
+        self.rescan_btn = QPushButton("현재 폴더 다시 배치")
+        self.rescan_btn.clicked.connect(lambda: self.request_scan.emit(self.path_input.text()))
+        self.files_btn = QPushButton("영상 직접 추가…")
+        self.files_btn.clicked.connect(self.browse_files)
+        self.clear_btn = QPushButton("전체 비우기")
+        self.clear_btn.clicked.connect(self.request_clear.emit)
+        for widget in (self.scan_mode, self.rescan_btn, self.files_btn, self.clear_btn):
+            manual_layout.addWidget(widget)
+        main_layout.addLayout(manual_layout)
+        main_layout.addWidget(QLabel("파일명과 관계없이 각 슬롯을 클릭하거나 영상을 드래그하세요. 빈 슬롯은 검정으로 출력됩니다."))
 
         # 1.5 Output Path (Optional)
         output_layout = QHBoxLayout()
@@ -376,8 +406,8 @@ class MainWindow(QMainWindow):
         
         # Codec Selection
         self.codec_combo = QComboBox()
-        self.codec_combo.addItems(["H.265 (HEVC)", "H.264"])
-        self.codec_combo.setCurrentIndex(0) # Default to H.265
+        self.codec_combo.addItems(["H.265 / MP4", "H.264 / MP4", "ProRes 422 / MOV", "ProRes 422 HQ / MOV"])
+        self.codec_combo.setCurrentIndex(1) # Default to H.265
         self.codec_combo.setToolTip("H.265: 고화질/저용량 (추천)\nH.264: 호환성 우수")
         self.codec_combo.setStyleSheet("padding: 10px;")
         
@@ -407,6 +437,17 @@ class MainWindow(QMainWindow):
         action_layout.addWidget(self.add_queue_btn)
         
         main_layout.addLayout(action_layout)
+        options_layout = QHBoxLayout()
+        self.duration_combo = QComboBox()
+        self.duration_combo.addItem("가장 짧은 영상에 맞춤", "shortest")
+        self.duration_combo.addItem("가장 긴 영상에 맞춤 (끝난 슬롯은 마지막 화면 유지)", "longest")
+        self.cancel_btn = QPushButton("작업 취소")
+        self.cancel_btn.setEnabled(False)
+        self.cancel_btn.clicked.connect(self.request_cancel.emit)
+        options_layout.addWidget(QLabel("출력: 1920×1080 · 오디오 없음 / 길이:"))
+        options_layout.addWidget(self.duration_combo)
+        options_layout.addWidget(self.cancel_btn)
+        main_layout.addLayout(options_layout)
 
         # 4.5 Queue List Area
         queue_group = QGroupBox("작업 대기열 (폴더를 드래그해서 추가하세요)")
@@ -414,6 +455,7 @@ class MainWindow(QMainWindow):
         queue_layout = QVBoxLayout(queue_group)
         
         self.queue_list = DragDropListWidget()
+        self.queue_list.setMaximumHeight(90)
         queue_layout.addWidget(self.queue_list)
         
         queue_btn_layout = QHBoxLayout()
@@ -453,9 +495,22 @@ class MainWindow(QMainWindow):
         # 5. Logs
         self.log_area = QTextEdit()
         self.log_area.setReadOnly(True)
-        self.log_area.setMaximumHeight(150)
+        self.log_area.setMaximumHeight(90)
         self.log_area.setStyleSheet("background: #111; color: #0f0; font-family: monospace;")
         main_layout.addWidget(self.log_area)
+
+    def closeEvent(self, event):
+        if self.cancel_btn.isEnabled():
+            self.request_cancel.emit()
+            self.log("작업을 취소하고 있습니다. 종료 후 창을 다시 닫아주세요.")
+            event.ignore()
+        else:
+            event.accept()
+
+    def browse_files(self):
+        paths, _ = QFileDialog.getOpenFileNames(self, "영상 직접 추가 (빈 슬롯 순서)", "", VIDEO_FILTER)
+        if paths:
+            self.request_files.emit(paths)
 
     def browse_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "폴더 선택")
@@ -495,11 +550,12 @@ class MainWindow(QMainWindow):
             self.queue_list.takeItem(row)
 
     def update_slots(self, file_map):
-        for idx, filepath in file_map.items():
+        for idx in range(9):
+            filepath = file_map.get(idx)
             filename = filepath.split(os.sep)[-1] if filepath else None
             # Ensure SlotWidget knows it's getting None if filepath is empty string
             if not filename: filename = None 
-            self.slots[idx].set_file(filename)
+            self.slots[idx].set_file(filepath)
             
     def log(self, message):
         self.log_area.append(message)

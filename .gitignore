@@ -169,3 +169,6 @@ cython_debug/
 
 # Installer scripts
 get-pip.py
+
+# v3 재현 가능한 앱 빌드 설정
+!DrivingPlateMultiviewer_v3.spec
