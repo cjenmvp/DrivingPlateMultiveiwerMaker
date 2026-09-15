@@ -2,6 +2,7 @@ import sys
 import os
 import subprocess
 import re
+import tempfile
 from PySide6.QtWidgets import QApplication, QMessageBox
 from PySide6.QtCore import QThread, Signal, QObject
 
@@ -9,12 +10,14 @@ from gui import MainWindow, LutConfigDialog
 from ffmpeg_engine import MultiviewerEngine
 
 class FFmpegWorker(QThread):
+    status = Signal(str)
     progress = Signal(int)      # percentage 0-100
     
-    def __init__(self, command, total_duration=0, parent=None):
+    def __init__(self, command, total_duration=0, parent=None, fallback_command=None):
         super().__init__(parent)
         self.command = command
         self.total_duration = total_duration
+        self.fallback_command = fallback_command
         
     def cancel(self):
         self.requestInterruption()
@@ -26,22 +29,38 @@ class FFmpegWorker(QThread):
         from collections import deque
         tail = deque(maxlen=80)
         try:
-            self.process = subprocess.Popen(self.command, stdout=subprocess.PIPE,
-                                            stderr=subprocess.STDOUT, text=True, errors="replace",
-                                            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
-            if self.isInterruptionRequested():
-                self.process.kill()
-            for line in self.process.stdout:
-                tail.append(line)
-                if line.startswith("out_time_us=") and self.total_duration > 0:
-                    try:
-                        self.progress.emit(min(99, int(int(line.split("=", 1)[1]) / 1000000 / self.total_duration * 100)))
-                    except ValueError:
-                        pass
-            code = self.process.wait()
-            self.process.stdout.close()
-            self.result_code = -2 if self.isInterruptionRequested() else code
-            self.result_message = "작업이 취소되었습니다." if self.isInterruptionRequested() else "".join(tail)
+            for attempt, command in enumerate([self.command, self.fallback_command]):
+                if command is None:
+                    break
+                if self.isInterruptionRequested():
+                    self.result_code, self.result_message = -2, "작업이 취소되었습니다."
+                    break
+                if attempt:
+                    # 자동 재시도의 출력은 컨트롤러가 소유한 임시 폴더 안에만 생성.
+                    if os.path.isfile(command[-1]):
+                        os.remove(command[-1])
+                    self.status.emit("하드웨어 렌더링 실패: CPU로 자동 재시도합니다.")
+                    self.progress.emit(0)
+                    tail.clear()
+                self.process = subprocess.Popen(command, stdout=subprocess.PIPE,
+                                                stderr=subprocess.STDOUT, text=True, errors="replace",
+                                                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+                if self.isInterruptionRequested():
+                    self.process.kill()
+                for line in self.process.stdout:
+                    tail.append(line)
+                    if line.startswith("out_time_us=") and self.total_duration > 0:
+                        try:
+                            self.progress.emit(min(99, int(int(line.split("=", 1)[1]) / 1000000 / self.total_duration * 100)))
+                        except ValueError:
+                            pass
+                code = self.process.wait()
+                self.process.stdout.close()
+                self.result_code = -2 if self.isInterruptionRequested() else code
+                self.result_message = "작업이 취소되었습니다." if self.isInterruptionRequested() else "".join(tail)
+                if self.result_code in (0, -2):
+                    break
+                self.status.emit(self.result_message[-2000:])
         except Exception as exc:
             self.result_code, self.result_message = -1, str(exc)
         finally:
@@ -65,6 +84,7 @@ class AppController(QObject):
         self.is_queue_running = False
         self.busy = False
         
+        self.view.request_folder_drop.connect(self.handle_folder_drop)
         self.view.request_files.connect(self.handle_files)
         self.view.request_clear.connect(self.handle_clear)
         self.view.request_cancel.connect(self.handle_cancel)
@@ -82,6 +102,7 @@ class AppController(QObject):
         
         # Connect Slot Manual Override
         for slot in self.view.slots:
+            slot.folders_dropped.connect(self.handle_folder_drop)
             slot.file_changed.connect(self.handle_manual_assignment)
         
     def get_short_lut_name(self, full_name):
@@ -189,11 +210,21 @@ class AppController(QObject):
     def handle_render(self):
         self.run_ffmpeg(is_preview=False)
 
+    def handle_folder_drop(self, folders):
+        if self.busy or not folders:
+            return
+        self.view.scan_mode.setCurrentIndex(0)
+        self.view.path_input.setText(folders[0])
+        self.view.text_input.setText(os.path.basename(folders[0].rstrip(os.sep)))
+        self.handle_scan(folders[0])
+        if len(folders) > 1:
+            self.handle_dropped_folders(folders)
+
     def handle_dropped_folders(self, folders):
         for folder in folders:
             # 1. Scan the dropped folder
             try:
-                mapping = self.engine.scan_folder(folder, self.view.scan_mode.currentData())
+                mapping = self.engine.scan_folder(folder, "naming")
                 for warning in self.engine.scan_warnings:
                     self.view.log(warning)
             except Exception as exc:
@@ -220,6 +251,7 @@ class AppController(QObject):
                 "text": default_text,
                 "output_root": output_root,
                 "lut_mapping": self.current_luts.copy(),
+                "acceleration": self.view.acceleration_combo.currentData(),
                 "codec_idx": self.view.codec_combo.currentIndex(),
                 "duration_mode": self.view.duration_combo.currentData(),
                 "status": "Ready"
@@ -243,6 +275,7 @@ class AppController(QObject):
             "text": ui_data['text'],
             "output_root": ui_data['output_root'],
             "lut_mapping": self.current_luts.copy(),
+            "acceleration": self.view.acceleration_combo.currentData(),
             "codec_idx": self.view.codec_combo.currentIndex(),
             "duration_mode": self.view.duration_combo.currentData(),
             "status": "Ready"
@@ -324,7 +357,8 @@ class AppController(QObject):
             "mapping": self.current_mapping,
             "text": self.view.text_input.text(),
             "output_root": self.view.output_input.text(),
-            "lut_mapping": self.current_luts
+            "lut_mapping": self.current_luts,
+            "acceleration": self.view.acceleration_combo.currentData()
         }
         
         self.run_ffmpeg_job(job, is_preview, is_queue=False)
@@ -335,6 +369,9 @@ class AppController(QObject):
         try:
             self.start_ffmpeg_job(job, is_preview, is_queue)
         except Exception as exc:
+            workspace = getattr(self, 'render_workspace', None)
+            if workspace:
+                workspace.cleanup()
             self.view.log(f"작업 준비 실패: {exc}")
             self.is_queue_running = False
             self.set_busy(False)
@@ -344,7 +381,7 @@ class AppController(QObject):
         for widget in (self.view.preview_btn, self.view.render_btn, self.view.add_queue_btn,
                        self.view.btn_queue_start, self.view.btn_queue_remove, self.view.queue_list,
                        self.view.browse_btn, self.view.path_input, self.view.rescan_btn, self.view.files_btn,
-                       self.view.clear_btn, self.view.lut_btn, *self.view.slots):
+                       self.view.clear_btn, self.view.lut_btn, self.view.folder_drop, *self.view.slots):
             widget.setEnabled(not busy)
         self.view.cancel_btn.setEnabled(busy)
 
@@ -365,16 +402,29 @@ class AppController(QObject):
         # Update Overlay Text
         overlay_text = job['text']
 
+        self.render_workspace = tempfile.TemporaryDirectory(prefix='.multiview-', dir=output_folder)
+        temporary_output = os.path.join(self.render_workspace.name, 'render' + extension)
+        acceleration = job.get('acceleration', 'auto')
         cmd = self.engine.build_command(
             job['mapping'], 
-            output_path, 
+            temporary_output,
             overlay_text=overlay_text, 
             is_preview=is_preview,
             codec_idx=codec_idx,
             lut_mapping=lut_mapping,
-            duration_mode=job.get("duration_mode", self.view.duration_combo.currentData())
+            duration_mode=job.get("duration_mode", self.view.duration_combo.currentData()),
+            acceleration=acceleration
         )
         
+        backend = self.engine.render_backend
+        fallback = None
+        if acceleration == 'auto' and 'videotoolbox' in backend:
+            fallback = self.engine.build_command(
+                job['mapping'], temporary_output, overlay_text=overlay_text,
+                is_preview=is_preview, codec_idx=codec_idx, lut_mapping=lut_mapping,
+                duration_mode=job.get('duration_mode', self.view.duration_combo.currentData()),
+                acceleration='cpu')
+        self.view.log(f"렌더링 엔진: {backend}" + (" (하드웨어)" if 'videotoolbox' in backend else " (CPU)"))
         total_duration = float(cmd[cmd.index('-t') + 1])
 
         self.view.log(f"작업 시작: {os.path.basename(output_path)}")
@@ -385,20 +435,37 @@ class AppController(QObject):
              
         self.set_busy(True)
         self.view.progress_bar.setValue(0)
-        self.worker = FFmpegWorker(cmd, total_duration, parent=self)
+        self.worker = FFmpegWorker(cmd, total_duration, parent=self, fallback_command=fallback)
         worker = self.worker
+        worker.status.connect(self.view.log)
         worker.progress.connect(self.view.progress_bar.setValue)
         worker.finished.connect(lambda: self.on_process_finished(
-            worker.result_code, worker.result_message, output_path, is_queue, is_preview))
+            worker.result_code, worker.result_message, output_path, is_queue, is_preview, temporary_output))
         worker.finished.connect(worker.deleteLater)
         self.worker.start()
         
-    def on_process_finished(self, code, msg, output_path, is_queue, is_preview):
+    def on_process_finished(self, code, msg, output_path, is_queue, is_preview, temporary_output=None):
+        if code == 0 and temporary_output:
+            try:
+                # 배타적 생성으로 예약한 빈 파일만 교체하여 기존 결과를 덮어쓰지 않음.
+                while True:
+                    try:
+                        with open(output_path, 'xb'):
+                            pass
+                        break
+                    except FileExistsError:
+                        output_path = self.get_unique_output_path(os.path.dirname(output_path), os.path.basename(output_path))
+                os.replace(temporary_output, output_path)
+            except OSError as exc:
+                code, msg = -1, f"출력 저장 실패: {exc}"
+        workspace = getattr(self, 'render_workspace', None)
+        if workspace:
+            workspace.cleanup()
         self.set_busy(False)
         if code == -2:
             self.is_queue_running = False
             self.view.progress_bar.setValue(0)
-            self.view.log(f"작업 취소됨. 대기열은 유지했습니다. 미완성 파일이 있을 수 있습니다: {output_path}")
+            self.view.log("작업 취소됨. 미완성 임시 파일을 정리하고 대기열은 유지했습니다.")
             return
 
         if code == 0:

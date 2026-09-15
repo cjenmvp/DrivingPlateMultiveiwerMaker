@@ -32,7 +32,7 @@ class EngineTests(unittest.TestCase):
             with self.subTest(codec=codec):
                 output = self.root / f'출력{codec}{ext}'
                 command = self.engine.build_command({0: str(self.prores), 8: str(self.h264)}, str(output),
-                    overlay_text="서울: O'Brien [A]; 100% \\ drive", codec_idx=codec)
+                    overlay_text="서울: O'Brien [A]; 100% \\ drive", codec_idx=codec, acceleration="cpu")
                 result = subprocess.run(command, capture_output=True, text=True, timeout=90)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 info = self.engine.probe(str(output))
@@ -119,6 +119,83 @@ class EngineTests(unittest.TestCase):
         self.assertTrue(worker.wait(1000))
         self.assertEqual(worker.result_code, -2)
         view.close()
+
+    def test_camera_prefix_and_folder_drop(self):
+        from PySide6.QtCore import QMimeData, QUrl, QPointF, Qt
+        from PySide6.QtGui import QDropEvent
+        from PySide6.QtWidgets import QApplication
+        from main import AppController
+        from gui import MainWindow
+        app = QApplication.instance() or QApplication([])
+        view = MainWindow()
+        controller = AppController(view, self.engine)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            names = ['10_front_02_take.mov', '12_back.MOV', '02_front.mov',
+                     '09_side.mov', 'Top_main.mov', '03_side.mov',
+                     '08_left.mov', '06_right.mov', '04_rear.mov']
+            for name in names:
+                (root / name).touch()
+            (root / '01_unused_02_take.mov').touch()
+            self.assertEqual(self.engine.camera_slot('uuid-1234_02_front.mov'), 2)
+            self.assertEqual(self.engine.camera_slot('03_front_02_take.mov'), 5)
+            self.assertIsNone(self.engine.camera_slot('102_front.mov'))
+            self.assertIsNone(self.engine.camera_slot('01_front_02_take.mov'))
+            self.assertIsNone(self.engine.camera_slot('uuid_02_03_scene.mov'))
+            view.scan_mode.setCurrentIndex(2)
+            mime = QMimeData()
+            mime.setUrls([QUrl.fromLocalFile(directory)])
+            event = QDropEvent(QPointF(10, 10), Qt.CopyAction, mime, Qt.LeftButton, Qt.NoModifier)
+            view.folder_drop.dropEvent(event)
+            self.assertTrue(event.isAccepted())
+            self.assertEqual(view.scan_mode.currentData(), 'naming')
+            self.assertEqual([Path(controller.current_mapping[i]).name for i in range(9)], names)
+            self.assertFalse(controller.job_queue)
+            controller.handle_folder_drop([directory, directory])
+            self.assertEqual(len(controller.job_queue), 2)
+            self.assertEqual(controller.job_queue[0]['acceleration'], 'auto')
+        view.close()
+
+    def test_hardware_failure_retries_cpu(self):
+        from unittest.mock import patch
+        from PySide6.QtCore import QEventLoop, QTimer
+        from PySide6.QtWidgets import QApplication
+        from main import AppController
+        from gui import MainWindow
+        app = QApplication.instance() or QApplication([])
+        view = MainWindow()
+        controller = AppController(view, self.engine)
+        controller.handle_manual_assignment(2, str(self.prores))
+        output_root = self.root / 'fallback'
+        view.output_input.setText(str(output_root))
+        with patch.object(self.engine, 'hardware_encoder', return_value='invalid_videotoolbox'), patch('main.QMessageBox.information'):
+            controller.run_ffmpeg(False)
+            loop = QEventLoop()
+            timer = QTimer()
+            timer.timeout.connect(lambda: loop.quit() if not controller.busy else None)
+            timer.start(20)
+            QTimer.singleShot(15000, loop.quit)
+            loop.exec()
+            timer.stop()
+        self.assertFalse(controller.busy)
+        self.assertIn('CPU로 자동 재시도', view.log_area.toPlainText())
+        outputs = list(output_root.glob('*.mp4'))
+        self.assertEqual(len(outputs), 1)
+        self.assertEqual(self.engine.probe(str(outputs[0]))['codec'], 'h264')
+        self.assertFalse(list(output_root.glob('.multiview-*')))
+        view.close()
+
+    @unittest.skipUnless(os.environ.get('MULTIVIEW_TEST_HARDWARE') == '1', '실제 Apple 하드웨어 검증은 별도 실행')
+    def test_real_hardware_all_codecs(self):
+        for codec in range(4):
+            with self.subTest(codec=codec):
+                output = self.root / f'hardware-{codec}{".mov" if codec in (2, 3) else ".mp4"}'
+                mapping = {i: str(self.prores if i % 2 else self.h264) for i in range(9)}
+                command = self.engine.build_command(mapping, str(output), codec_idx=codec, acceleration='hardware')
+                self.assertIn('videotoolbox', self.engine.render_backend)
+                result = subprocess.run(command, capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.engine.probe(str(output))['codec'], ['hevc', 'h264', 'prores', 'prores'][codec])
 
     def test_manual_gui_without_scan(self):
         from PySide6.QtWidgets import QApplication

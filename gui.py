@@ -1,5 +1,6 @@
 import sys
 from ffmpeg_engine import VIDEO_FILTER
+from version import __version__
 import os
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
@@ -28,6 +29,7 @@ class DarkPalette(QPalette):
         self.setColor(QPalette.HighlightedText, Qt.black)
 
 class SlotWidget(QFrame):
+    folders_dropped = Signal(list)
     file_changed = Signal(int, str) # slot_idx, file_path
 
     def __init__(self, slot_idx, label_text):
@@ -72,8 +74,12 @@ class SlotWidget(QFrame):
         if files:
             # Take the first file
             filepath = files[0]
-            if os.path.isfile(filepath):
+            if os.path.isdir(filepath):
+                self.folders_dropped.emit([p for p in files if os.path.isdir(p)])
+                event.acceptProposedAction()
+            elif os.path.isfile(filepath):
                 self.file_changed.emit(self.slot_idx, filepath)
+                event.acceptProposedAction()
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -92,6 +98,28 @@ class SlotWidget(QFrame):
             self.file_label.setText("비어 있음 (검정 출력)")
             self.file_label.setToolTip("")
             self.file_label.setStyleSheet("color: #aaa;")
+
+class FolderDropArea(QLabel):
+    folders_dropped = Signal(list)
+
+    def __init__(self):
+        super().__init__("폴더를 여기에 드래그 → 02_, 03_ 등 번호로 자동 배치 · 여러 폴더는 대기열 추가")
+        self.setAcceptDrops(True)
+        self.setAlignment(Qt.AlignCenter)
+        self.setStyleSheet("border: 2px dashed #4b8fc5; color: #a9d5f8; padding: 12px; background: #22303c;")
+
+    def dragEnterEvent(self, event):
+        if any(os.path.isdir(url.toLocalFile()) for url in event.mimeData().urls()):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        folders = [url.toLocalFile() for url in event.mimeData().urls() if os.path.isdir(url.toLocalFile())]
+        if folders:
+            self.folders_dropped.emit(folders)
+            event.acceptProposedAction()
+
 
 class DragDropListWidget(QListWidget):
     folders_dropped = Signal(list)
@@ -265,6 +293,7 @@ class LutConfigDialog(QDialog):
 
 class MainWindow(QMainWindow):
     # Signals to be connected in controller
+    request_folder_drop = Signal(list)
     request_files = Signal(list)
     request_clear = Signal()
     request_cancel = Signal()
@@ -278,8 +307,9 @@ class MainWindow(QMainWindow):
     
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("CJENMVP 드라이빙플레이트 멀티뷰어 생성기 v3.0")
-        self.resize(1000, 800)
+        self.setWindowTitle(f"CJENMVP 드라이빙플레이트 멀티뷰어 생성기 v{__version__}")
+        self.resize(1080, 850)
+        self.setAcceptDrops(True)
         
         # Apply Dark Theme
         self.setPalette(DarkPalette())
@@ -294,10 +324,15 @@ class MainWindow(QMainWindow):
         main_layout.setSpacing(8)
         main_layout.setContentsMargins(12, 12, 12, 12)
 
+        self.folder_drop = FolderDropArea()
+        self.folder_drop.folders_dropped.connect(self.request_folder_drop.emit)
+        main_layout.addWidget(self.folder_drop)
+
         # 1. Header (Folder Selection)
         header_layout = QHBoxLayout()
         
         self.path_input = QLineEdit()
+        self.path_input.setAcceptDrops(False)
         self.path_input.setPlaceholderText("폴더 선택...")
         self.path_input.setStyleSheet("padding: 8px; border-radius: 4px; background: #333; color: white;")
         
@@ -437,6 +472,15 @@ class MainWindow(QMainWindow):
         action_layout.addWidget(self.add_queue_btn)
         
         main_layout.addLayout(action_layout)
+        acceleration_layout = QHBoxLayout()
+        self.acceleration_combo = QComboBox()
+        self.acceleration_combo.addItem("자동 · Apple 하드웨어 우선 (추천)", "auto")
+        self.acceleration_combo.addItem("CPU · 소프트웨어 인코딩", "cpu")
+        self.acceleration_combo.addItem("Apple 하드웨어만 사용", "hardware")
+        acceleration_layout.addWidget(QLabel("렌더링 가속:"))
+        acceleration_layout.addWidget(self.acceleration_combo)
+        acceleration_layout.addWidget(QLabel("자동 모드: 하드웨어 불가/실패 시 CPU로 전환"))
+        main_layout.addLayout(acceleration_layout)
         options_layout = QHBoxLayout()
         self.duration_combo = QComboBox()
         self.duration_combo.addItem("가장 짧은 영상에 맞춤", "shortest")
@@ -498,6 +542,18 @@ class MainWindow(QMainWindow):
         self.log_area.setMaximumHeight(90)
         self.log_area.setStyleSheet("background: #111; color: #0f0; font-family: monospace;")
         main_layout.addWidget(self.log_area)
+
+    def dragEnterEvent(self, event):
+        if self.folder_drop.isEnabled() and any(os.path.isdir(u.toLocalFile()) for u in event.mimeData().urls()):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        folders = [u.toLocalFile() for u in event.mimeData().urls() if os.path.isdir(u.toLocalFile())]
+        if folders and self.folder_drop.isEnabled():
+            self.request_folder_drop.emit(folders)
+            event.acceptProposedAction()
 
     def closeEvent(self, event):
         if self.cancel_btn.isEnabled():
