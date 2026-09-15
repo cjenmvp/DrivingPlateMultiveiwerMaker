@@ -3,7 +3,7 @@ import os
 import subprocess
 import re
 import tempfile
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication, QMessageBox, QFileDialog
 from PySide6.QtCore import QThread, Signal, QObject
 
 from gui import MainWindow, LutConfigDialog
@@ -156,6 +156,7 @@ class AppController(QObject):
 
     def handle_manual_assignment(self, slot_idx, filepath):
         if filepath:
+            filepath = os.path.abspath(os.path.expanduser(filepath))
             try:
                 info = self.engine.probe(filepath)
             except Exception as exc:
@@ -191,6 +192,7 @@ class AppController(QObject):
                 self.view.log(f"대기중인 {updated_count}개 작업에도 LUT 설정이 적용되었습니다.")
 
     def handle_scan(self, folder_path):
+        folder_path = os.path.abspath(os.path.expanduser(folder_path.strip()))
         self.view.log(f"스캔 중: {folder_path}")
         try:
             mapping = self.engine.scan_folder(folder_path, self.view.scan_mode.currentData())
@@ -198,6 +200,7 @@ class AppController(QObject):
             self.view.log(f"스캔 실패: {exc}")
             return
         self.current_folder = folder_path
+        self.view.path_input.setText(folder_path)
         self.current_mapping = mapping
         for warning in self.engine.scan_warnings:
             self.view.log(warning)
@@ -222,6 +225,7 @@ class AppController(QObject):
 
     def handle_dropped_folders(self, folders):
         for folder in folders:
+            folder = os.path.abspath(os.path.expanduser(folder))
             # 1. Scan the dropped folder
             try:
                 mapping = self.engine.scan_folder(folder, "naming")
@@ -385,13 +389,44 @@ class AppController(QObject):
             widget.setEnabled(not busy)
         self.view.cancel_btn.setEnabled(busy)
 
+    def prepare_render_workspace(self, job, source_folder):
+        requested = job.get('output_root', '').strip()
+        output_folder = os.path.expanduser(requested) if requested else source_folder
+        if not os.path.isabs(output_folder):
+            output_folder = os.path.join(source_folder, output_folder)
+        output_folder = os.path.abspath(output_folder)
+        while True:
+            try:
+                os.makedirs(output_folder, exist_ok=True)
+                # 실제 파일 생성을 검사해야 읽기 전용 볼륨과 ACL도 확인 가능.
+                workspace = tempfile.TemporaryDirectory(prefix='.multiview-', dir=output_folder)
+            except OSError as exc:
+                self.view.log(f"저장 폴더에 쓸 수 없습니다: {output_folder}\n{exc}")
+                selected = QFileDialog.getExistingDirectory(
+                    self.view, "저장할 수 없는 위치입니다 — 다른 저장 폴더 선택", source_folder)
+                if not selected:
+                    raise ValueError("저장 위치 선택을 취소했습니다. 원본과 대기열은 유지됩니다.") from exc
+                output_folder = os.path.abspath(os.path.expanduser(selected))
+                # 동일한 저장 설정의 대기 작업에도 사용자가 다시 고른 위치 적용.
+                for pending in self.job_queue:
+                    if pending.get('output_root', '').strip() == requested:
+                        pending['output_root'] = output_folder
+                job['output_root'] = output_folder
+                continue
+            self.view.output_input.setText(output_folder)
+            self.view.log(f"확인된 저장 폴더: {output_folder}")
+            return output_folder, workspace
+
     def start_ffmpeg_job(self, job, is_preview, is_queue):
         # Core runner
         
         first_input = next(p for p in job['mapping'].values() if p)
-        source_folder = job.get('folder') or os.path.dirname(os.path.abspath(first_input))
-        output_folder = job['output_root'].strip() or source_folder
-        os.makedirs(output_folder, exist_ok=True)
+        source_folder = os.path.expanduser(job.get('folder') or '')
+        if not os.path.isabs(source_folder):
+            source_folder = os.path.dirname(os.path.abspath(first_input))
+        source_folder = os.path.abspath(source_folder)
+        self.render_workspace = None
+        output_folder, self.render_workspace = self.prepare_render_workspace(job, source_folder)
         suffix = "_preview" if is_preview else "_multiview"
         folder_name = os.path.basename(source_folder.rstrip(os.sep)) or "manual"
         codec_idx = job.get('codec_idx', self.view.codec_combo.currentIndex())
@@ -402,7 +437,6 @@ class AppController(QObject):
         # Update Overlay Text
         overlay_text = job['text']
 
-        self.render_workspace = tempfile.TemporaryDirectory(prefix='.multiview-', dir=output_folder)
         temporary_output = os.path.join(self.render_workspace.name, 'render' + extension)
         acceleration = job.get('acceleration', 'auto')
         cmd = self.engine.build_command(

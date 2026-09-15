@@ -11,6 +11,30 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont, QColor, QPalette
 
+class DirectoryPathEdit(QLineEdit):
+    directory_dropped = Signal(str)
+
+    def dragEnterEvent(self, event):
+        if any(os.path.isdir(u.toLocalFile()) for u in event.mimeData().urls()):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        self.dragEnterEvent(event)
+
+    def dropEvent(self, event):
+        for url in event.mimeData().urls():
+            path = url.toLocalFile()
+            if os.path.isdir(path):
+                path = os.path.abspath(path)
+                self.setText(path)
+                self.directory_dropped.emit(path)
+                event.acceptProposedAction()
+                return
+        event.ignore()
+
+
 class DarkPalette(QPalette):
     def __init__(self):
         super().__init__()
@@ -331,8 +355,8 @@ class MainWindow(QMainWindow):
         # 1. Header (Folder Selection)
         header_layout = QHBoxLayout()
         
-        self.path_input = QLineEdit()
-        self.path_input.setAcceptDrops(False)
+        self.path_input = DirectoryPathEdit()
+        self.path_input.directory_dropped.connect(lambda folder: self.request_folder_drop.emit([folder]))
         self.path_input.setPlaceholderText("폴더 선택...")
         self.path_input.setStyleSheet("padding: 8px; border-radius: 4px; background: #333; color: white;")
         
@@ -367,8 +391,9 @@ class MainWindow(QMainWindow):
 
         # 1.5 Output Path (Optional)
         output_layout = QHBoxLayout()
-        self.output_input = QLineEdit()
-        self.output_input.setPlaceholderText("저장 경로 (비워두면 원본 폴더에 저장)")
+        self.output_input = DirectoryPathEdit()
+        self.output_input.setPlaceholderText("저장 폴더 (폴더 드롭 가능 · 비우면 원본 폴더)")
+        self.output_input.setToolTip("폴더를 드롭하면 전체 경로가 입력됩니다. 상대 경로는 원본 폴더를 기준으로 처리합니다.")
         self.output_input.setStyleSheet("padding: 8px; border-radius: 4px; background: #333; color: white;")
         
         self.output_btn = QPushButton("저장 위치 변경")

@@ -197,6 +197,99 @@ class EngineTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(self.engine.probe(str(output))['codec'], ['hevc', 'h264', 'prores', 'prores'][codec])
 
+    def test_output_folder_drop_uses_full_path(self):
+        from PySide6.QtCore import QMimeData, QUrl, QPointF, Qt
+        from PySide6.QtGui import QDropEvent
+        from PySide6.QtWidgets import QApplication
+        from gui import MainWindow
+        app = QApplication.instance() or QApplication([])
+        view = MainWindow()
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(str(self.root))])
+        mime.setText(self.root.name)
+        event = QDropEvent(QPointF(10, 10), Qt.CopyAction, mime, Qt.LeftButton, Qt.NoModifier)
+        view.output_input.dropEvent(event)
+        self.assertTrue(event.isAccepted())
+        self.assertEqual(view.output_input.text(), str(self.root))
+        self.assertTrue(os.path.isabs(view.output_input.text()))
+        view.close()
+
+    def test_relative_output_render_from_filesystem_root(self):
+        from unittest.mock import patch
+        from PySide6.QtCore import QEventLoop, QTimer
+        from PySide6.QtWidgets import QApplication
+        from main import AppController
+        from gui import MainWindow
+        app = QApplication.instance() or QApplication([])
+        view = MainWindow()
+        controller = AppController(view, self.engine)
+        controller.handle_manual_assignment(2, str(self.prores))
+        label = '250821_D07_60p_D-log_정동진_해안도로'
+        controller.current_folder = label
+        view.output_input.setText(label)
+        view.acceleration_combo.setCurrentIndex(1)
+        previous_cwd = os.getcwd()
+        try:
+            # Finder에서 실행한 앱처럼 CWD가 /인 조건을 재현.
+            os.chdir(os.path.abspath(os.sep))
+            with patch('main.QMessageBox.information'), patch('main.QFileDialog.getExistingDirectory', return_value='') as chooser:
+                controller.run_ffmpeg(False)
+                self.assertTrue(controller.busy, view.log_area.toPlainText())
+                loop = QEventLoop()
+                timer = QTimer()
+                timer.timeout.connect(lambda: loop.quit() if not controller.busy else None)
+                timer.start(20)
+                QTimer.singleShot(15000, loop.quit)
+                loop.exec()
+                timer.stop()
+                chooser.assert_not_called()
+            self.assertFalse(controller.busy)
+            outputs = list((self.root / label).glob('*.mp4'))
+            self.assertEqual(len(outputs), 1, view.log_area.toPlainText())
+            self.assertEqual(view.output_input.text(), str(self.root / label))
+            self.assertEqual(self.engine.probe(str(outputs[0]))['codec'], 'h264')
+        finally:
+            os.chdir(previous_cwd)
+            view.close()
+
+    def test_readonly_destination_reselect_and_cancel(self):
+        import errno
+        from unittest.mock import patch
+        from PySide6.QtWidgets import QApplication
+        from main import AppController
+        from gui import MainWindow
+        app = QApplication.instance() or QApplication([])
+        view = MainWindow()
+        controller = AppController(view, self.engine)
+        blocked = self.root / 'readonly'
+        selected = self.root / 'writable'
+        selected.mkdir(exist_ok=True)
+        factory = tempfile.TemporaryDirectory
+        def reserve(*args, **kwargs):
+            if kwargs['dir'] == str(blocked):
+                raise OSError(errno.EROFS, 'Read-only file system', str(blocked))
+            return factory(*args, **kwargs)
+        job = {'output_root': str(blocked)}
+        pending = {'output_root': str(blocked)}
+        controller.job_queue = [pending]
+        with patch('main.tempfile.TemporaryDirectory', side_effect=reserve), patch(
+                'main.QFileDialog.getExistingDirectory', return_value=str(selected)) as chooser:
+            folder, workspace = controller.prepare_render_workspace(job, str(self.root))
+            try:
+                self.assertEqual(folder, str(selected))
+                self.assertTrue(Path(workspace.name).is_dir())
+                self.assertEqual(pending['output_root'], str(selected))
+                self.assertEqual(view.output_input.text(), str(selected))
+                chooser.assert_called_once()
+            finally:
+                workspace.cleanup()
+        with patch('main.tempfile.TemporaryDirectory', side_effect=reserve), patch(
+                'main.QFileDialog.getExistingDirectory', return_value=''):
+            with self.assertRaisesRegex(ValueError, '취소'):
+                controller.prepare_render_workspace({'output_root': str(blocked)}, str(self.root))
+        self.assertEqual(len(controller.job_queue), 1)
+        view.close()
+
     def test_manual_gui_without_scan(self):
         from PySide6.QtWidgets import QApplication
         from main import AppController
